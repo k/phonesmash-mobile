@@ -9,14 +9,16 @@
 #import "PSViewController.h"
 #import <CoreMotion/CoreMotion.h>
 
-float const kDeviceMotionUpdateInterval = 0.05;
-float const kInstantAccel = 10;
-float const kMinForce = 3;
+float const kDeviceMotionUpdateInterval = 0.01;
+float const kJerkThreshold = 10;
+float const kMinGrav = 0.5;
+#define kMinForce  0.1
 #define kFilterFactor 0.1
 
 @interface PSViewController () {
     CMMotionManager *motion;
     BOOL throwing;
+    NSDate *startDate;
 }
 @property (strong, nonatomic) IBOutlet UIButton *restartButton;
 - (IBAction)restart:(id)sender;
@@ -48,9 +50,7 @@ float const kMinForce = 3;
         [motion startDeviceMotionUpdates];
         throwing = YES;
     } else { // Temporary for testing purposes
-        [motion stopDeviceMotionUpdates];
-        self.view.backgroundColor = [UIColor whiteColor];
-        _restartButton.hidden = NO;
+        [self.view setNeedsDisplay];
     }
     
 }
@@ -63,38 +63,48 @@ float const kMinForce = 3;
 }
 
 - (void)startMotion {
-    double prevforce = -1;
-    NSDate *startTime = [NSDate date];
-    _restartButton.hidden = NO;
-    
-    CMDeviceMotion *data;
-    double ax, ay, az, gx, gy, gz;
-    while (motion.deviceMotionActive) {
-        data = motion.deviceMotion;
-        CMAcceleration accel = data.userAcceleration;
-        ax = accel.x - (accel.x * kFilterFactor) + (ax * (1 - kFilterFactor));
-        ay = accel.y - (accel.y * kFilterFactor) + (ay * (1 - kFilterFactor));
-        az = accel.z - (accel.z * kFilterFactor) + (az * (1 - kFilterFactor));
-        gx = (accel.x * kFilterFactor) + (gx * (1 - kFilterFactor));
-        gy = (accel.y * kFilterFactor) + (gy * (1 - kFilterFactor));
-        gz = (accel.z * kFilterFactor) + (gz * (1 - kFilterFactor));
-        
-        double force = sqrt(pow(ax, 2) + pow(ay, 2) + pow(az, 2));
-        double gforce = sqrt(pow(gx, 2) + pow(gy, 2) + pow(gz, 2));
-//        double gforce = sqrt(pow(ax - gx, 2) + pow(ay - gy, 2) + pow(az - gz, 2));
-//        double jerk = abs(force - prevforce) / kDeviceMotionUpdateInterval;
-        
-//        NSString *formatString = @"\nax: %9.5d ay: %9.5d az: %9.5d Force: %9.5d \ngx: %9.5d gy: %9.5d gz: %9.5d Gravity: %9.5d\n Jerk: %9.5d";
-        NSLog(@"%2.6f %2.6f %2.6f Force: %2.6f", ax, ay, az, force);
-        NSLog(@"%2.6f %2.6f %2.6f Gravity: %2.6f", gx, gy, gz, gforce);
-//        if (-[startTime timeIntervalSinceNow] > 0.2 && force > kInstantAccel) {
-//             [motion stopDeviceMotionUpdates];
-//             [self updateTime:-[startTime timeIntervalSinceNow]];
-//             break;
-//         }
-        prevforce = force;
-        [NSThread sleepForTimeInterval:0.05];
-    }
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0),
+       ^()     {
+           double prevforce = -1;
+           startDate = [NSDate date];
+           NSDate *prevTime = startDate;
+           _restartButton.hidden = NO;
+           NSDate *now;
+           
+           CMDeviceMotion *data;
+           double ax, ay, az, gx, gy, gz;
+           while (motion.deviceMotionActive) {
+               data = motion.deviceMotion;
+               now = [NSDate date];
+               CMAcceleration accel = data.userAcceleration;
+               ax = accel.x;
+               ay = accel.y;
+               az = accel.z;
+               accel = data.gravity;
+               gx = accel.x;
+               gy = accel.y;
+               gz = accel.z;
+               
+               double force = sqrt(pow(ax, 2) + pow(ay, 2) + pow(az, 2));
+               double gforce = sqrt(pow(ax - gx, 2) + pow(ay - gy, 2) + pow(az - gz, 2));
+               if (prevforce == -1) prevforce = force;
+               double jerk = (force - prevforce) / [now timeIntervalSinceDate:prevTime];
+               if (jerk < 0) jerk *= -1;
+               
+               //        NSString *formatString = @"\nax: %9.5d ay: %9.5d az: %9.5d Force: %9.5d \ngx: %9.5d gy: %9.5d gz: %9.5d Gravity: %9.5d\n Jerk: %9.5d";
+               NSLog(@"%2.6f %2.6f %2.6f Force: %2.6f", ax, ay, az, force);
+               NSLog(@"%2.6f %2.6f %2.6f Gravity: %2.6f", gx, gy, gz, gforce);
+               NSLog(@"  %2.6f", jerk);
+               if (-[startDate timeIntervalSinceNow] > 0.2 && (jerk > kJerkThreshold ||  force < kMinForce)) {
+                   [motion stopDeviceMotionUpdates];
+                   [self updateTime:-[startDate timeIntervalSinceNow]];
+                   break;
+               }
+               prevforce = force;
+               prevTime = now;
+               [NSThread sleepForTimeInterval:0.04];
+           }
+       });
 }
 
 - (void)updateTime:(NSTimeInterval) time {
